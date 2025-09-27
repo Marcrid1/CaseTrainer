@@ -1,8 +1,12 @@
+// Model
+const REALTIME_MODEL = "gpt-4o-mini-realtime-preview";
+
 // server.js (CommonJS)
 const express = require("express");
 const cors = require("cors");
 const path = require("path");
 const { buildInstructions, normalizeMode, normalizeLanguage } = require("./agent/buildInstructions");
+const { getQuestion } = require("./tools/questionBank");
 
 // Node >=18: global fetch verfügbar
 const app = express();
@@ -33,7 +37,7 @@ app.get("/session", async (req, res) => {
 
     // 3) Request-Payload für die Realtime-Session
     const sessionBody = {
-      model: "gpt-realtime",
+      model: REALTIME_MODEL,
       voice: "ash",
       instructions,
       turn_detection: {
@@ -41,14 +45,26 @@ app.get("/session", async (req, res) => {
         threshold: 0.40,
         silence_duration_ms: 220,
         prefix_padding_ms: 160,
-        interrupt_response: true
+        interrupt_response: true,
       },
-      // (optional) Audioformate – nur setzen, wenn du’s wirklich brauchst
-      // input_audio_format: { type: "wav", sample_rate_hz: 16000 },
-      // output_audio_format: { type: "wav", sample_rate_hz: 24000 },
+      tools: [
+      {
+        type: "function",
+        name: "question_bank_get",
+        description: "Fetch a question from the question pool. The agent translates to the session language.",
+        parameters: {
+          type: "object",
+          properties: {
+            qtype: { type: "string", enum: ["personal-fit", "behavioral"] }
+          },
+          required: ["qtype"]
+        }
+      }
+    ]
     };
 
     // 4) Realtime-Session beim OpenAI-Endpoint anlegen
+    console.log("tools enabled:", sessionBody.tools?.map(t=>t.name));
     const r = await fetch("https://api.openai.com/v1/realtime/sessions", {
       method: "POST",
       headers: {
@@ -99,6 +115,19 @@ app.get("/session", async (req, res) => {
   } catch (e) {
     console.error("Unhandled /session error:", e);
     res.status(500).json({ error: String(e?.message || e) });
+  }
+});
+
+app.get("/tool/question", async (req, res) => {
+  try {
+    const qtype = (req.query.qtype || "").toLowerCase();
+    if (!["personal-fit", "behavioral"].includes(qtype)) {
+      return res.status(400).json({ error: "qtype must be 'personal-fit' or 'behavioral'" });
+    }
+    const q = await getQuestion({ qtype });
+    res.json(q); // { id, type, question, guidance }
+  } catch (e) {
+    res.status(500).json({ error: String(e.message || e) });
   }
 });
 

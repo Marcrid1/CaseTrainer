@@ -27,16 +27,18 @@ async function buildInstructions({ mode, language }) {
   const md = await fs.readFile(mdPath, "utf8");
 
   // Minimal, model-friendly preamble (no YAML, no JSON—just directives)
-  const preamble = [
-    `You MUST interview in ${lang === "de" ? "German" : "English"}.`,
-    `Interview scope (mode): ${selMode}.`,
-    `Respect the mode strictly:`,
-    `- personal-fit → ask only motivation/fit/values questions.`,
-    `- behavioral → ask only behavior (past actions) questions; you MAY suggest light structure.`,
-    `- case → ask only lightweight case-style prompts; not a full-length case.`,
-    `- full → mix of the above, brief and balanced.`,
-    `Ask ONE clear question at a time. Do NOT score or decide here.`
-  ].join(" ");
+const preamble = [
+  `You MUST interview in ${lang === "de" ? "German" : "English"}.`,
+  `Interview scope (mode): ${selMode}.`,
+  `All interview questions MUST be sourced via the function tool 'question_bank_get'.`,
+  `Do NOT invent or write your own questions. Whenever you need the next question, CALL 'question_bank_get' with qtype based on mode:`,
+  `- personal-fit → qtype="personal-fit"`,
+  `- behavioral → qtype="behavioral"`,
+  `- full → choose one per turn.`,
+  `The question texts in the pool are in English; you MUST translate your spoken output to the session language.`,
+  `Ask ONE clear question at a time. Do NOT score or decide here.`
+].join(" ");
+
 
   return `${preamble}\n\n${md}`;
 }

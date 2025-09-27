@@ -2,26 +2,17 @@
 <html lang="de">
 <head>
   <meta charset="utf-8" />
-  <title>Realtime Voice (WebRTC)</title>
+  <title>Realtime Voice (WebRTC) – Recruiter</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <style>
-    :root { color-scheme: light dark; }
-    body { font-family: system-ui, sans-serif; margin: 2rem; }
-    button, select { padding: .6rem 1rem; margin-right: .5rem; }
-    fieldset { border: 1px solid #8884; padding: .8rem 1rem; border-radius: .6rem; margin-bottom: 1rem; }
-    legend { padding: 0 .4rem; }
-    #log { margin-top: 1rem; white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-    #audio-out { display:block; margin-top:1rem; width:100%; }
-    .row { display:flex; align-items:center; gap:.5rem; flex-wrap:wrap; }
-    .muted { opacity:.8; font-size:.9rem; }
-  </style>
+  <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
-  <h1>OpenAI Realtime Voice (WebRTC)</h1>
-  <p class="muted">Einfach sprechen – barge-in übernimmt der Server (Server-VAD). Stabiler Rollover.</p>
+  <header>
+    <h1>Recruiter Interview (Realtime)</h1>
+    <p class="muted">Sprich nach Klick auf Start. Server-VAD erlaubt Barge-in. Ephemeral Rollover aktiv.</p>
+  </header>
 
-  <fieldset>
-    <legend>Session Settings</legend>
+  <section class="panel">
     <div class="row">
       <label for="language"><strong>Language</strong></label>
       <select id="language">
@@ -31,285 +22,26 @@
 
       <label for="mode"><strong>Mode</strong></label>
       <select id="mode">
-        <option value="full" selected>Full interview</option>
-        <option value="personal-fit">Personal-fit</option>
+        <option value="personal-fit" selected>Personal-fit</option>
         <option value="behavioral">Behavioral</option>
-        <option value="case">Case (lite)</option>
       </select>
 
       <button id="apply">Apply</button>
-      <span class="muted">Diese Werte werden bei der nächsten Session-Erstellung an <code>/session</code> übergeben.</span>
     </div>
-  </fieldset>
+  </section>
 
-  <div class="row">
+  <section class="controls">
     <button id="start">Start</button>
     <button id="stop" disabled>Stop</button>
-  </div>
+  </section>
 
-  <audio id="audio-out" autoplay playsinline controls></audio>
-  <div id="log"></div>
+  <!-- Audio-Element unsichtbar (kein Balken) -->
+  <audio id="audio-out" autoplay playsinline hidden></audio>
 
-<script>
-/* ---------- UI State ---------- */
-const state = {
-  language: localStorage.getItem("rt_lang") || "en",
-  mode: localStorage.getItem("rt_mode") || "full",
-};
-const $lang = document.getElementById("language");
-const $mode = document.getElementById("mode");
-const $apply = document.getElementById("apply");
-$lang.value = state.language;
-$mode.value = state.mode;
+  <section class="log-wrap">
+    <pre id="log"></pre>
+  </section>
 
-$apply.onclick = () => {
-  state.language = $lang.value;
-  state.mode = $mode.value;
-  localStorage.setItem("rt_lang", state.language);
-  localStorage.setItem("rt_mode", state.mode);
-  log("✅ Settings gespeichert → language:", state.language, "mode:", state.mode);
-};
-
-/* ---------- Logging ---------- */
-const log = (...a) => {
-  document.getElementById("log").textContent += a.map(x => typeof x === "string" ? x : JSON.stringify(x)).join(" ") + "\n";
-};
-
-/* ---------- OPTIONAL TURN (hinter Symmetric NAT) ---------- */
-// window.TURN = { urls: ["turn:your.turn.host:3478"], username: "user", credential: "pass" };
-
-/* ---------- Expiry Helper ---------- */
-function normalizeExpiry(expVal) {
-  // akzeptiert ISO-String, ms-epoch oder s-epoch
-  if (!expVal) return null;
-  if (typeof expVal === "string") {
-    const t = Date.parse(expVal);
-    return isNaN(t) ? null : t;
-  }
-  if (typeof expVal === "number") {
-    // Sekunden → Millisekunden
-    return expVal < 1e12 ? expVal * 1000 : expVal;
-  }
-  return null;
-}
-
-/* ---------- Session Fetch (mit Payload/Query) ---------- */
-async function fetchSession() {
-  const qs = new URLSearchParams({
-    language: state.language || "en",
-    mode: state.mode || "full"
-  });
-  const r = await fetch(`/session?${qs.toString()}`);
-  const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(data?.error || `HTTP ${r.status}`);
-
-  const key = data?.client_secret?.value || data?.client_secret || data?.value;
-  const rawExp =
-    data?.expires_at ||
-    data?.client_secret?.expires_at ||
-    data?.session?.expires_at ||
-    data?.session?.client_secret?.expires_at ||
-    null;
-
-  const expMs = normalizeExpiry(rawExp);
-  if (!key) {
-    console.error("Session response:", data);
-    throw new Error("No client secret in /session");
-  }
-  log("ℹ️ Session erstellt mit Settings → language:", state.language, "mode:", state.mode);
-  if (rawExp && !expMs) log("⚠️ expires_at konnte nicht geparst werden:", rawExp);
-  if (expMs) log("ℹ️ expires_at (ms):", expMs, "→ in", Math.max(0, Math.round((expMs - Date.now())/1000)), "s");
-  return { key, expiresAtMs: expMs };
-}
-
-/* ---------- WebRTC ---------- */
-let pc = null;
-let micStream = null;
-let dc = null;
-let rolloverTimer = null;
-let currentKey = null;
-let currentExpiryMs = null;
-
-const audioEl = document.getElementById("audio-out");
-
-function cleanup() {
-  if (rolloverTimer) clearTimeout(rolloverTimer), rolloverTimer = null;
-  try { dc && dc.close(); } catch {}
-  if (pc) {
-    try { pc.getSenders().forEach(s => { try { s.track && s.track.stop(); } catch {} }); } catch {}
-    try { pc.close(); } catch {}
-  }
-  if (micStream) { try { micStream.getTracks().forEach(t => t.stop()); } catch {} }
-  pc = null; micStream = null; dc = null;
-  audioEl.srcObject = null;
-  log("⏹️ Cleaned up");
-}
-
-function scheduleRollover() {
-  // Nutze echtes expires_at; min. 10s, max. sicherer fallback 90s wenn unbekannt
-  let msUntil = currentExpiryMs ? (currentExpiryMs - Date.now() - 15_000) : 90_000;
-  msUntil = Math.max(msUntil, 10_000);
-  log("⏱️ Rollover in", Math.round(msUntil/1000), "s geplant");
-  rolloverTimer = setTimeout(() => {
-    softRollover().catch(e => log("Rollover error:", e.message || e));
-  }, msUntil);
-}
-
-function getIceServers() {
-  const ice = [{ urls: ["stun:stun.l.google.com:19302"] }];
-  if (window.TURN?.urls?.length) {
-    ice.push({ urls: window.TURN.urls, username: window.TURN.username, credential: window.TURN.credential });
-  }
-  return ice;
-}
-
-function attachDCHandlers(targetPc, channel, origin) {
-  channel.onopen = () => {
-    if (targetPc === pc) {
-      dc = channel;
-      log(`ℹ️ DataChannel open (${origin})`);
-      // optional: Session-Info anfragen
-      try { dc.send(JSON.stringify({ type: "session.update", session: {} })); } catch {}
-      // optional: dem Agent die Settings nochmals mitteilen (falls du sie im Prompt auswertest)
-    } else {
-      targetPc._pendingOAIChannel = channel;
-      log(`ℹ️ Secondary DataChannel open (${origin}), pending promote`);
-    }
-  };
-  channel.onclose = () => { if (targetPc === pc) log("ℹ️ DataChannel closed"); };
-  channel.onmessage = (evt) => {
-    if (typeof evt.data !== "string") return;
-    try {
-      const obj = JSON.parse(evt.data);
-      if (obj?.type === "error") {
-        log("evt error:", obj.error || obj);
-      } else {
-        const t = obj?.type;
-        if (t) log("evt:", t);
-      }
-    } catch {
-      log("evt non-json:", evt.data);
-    }
-  };
-}
-
-async function createPeer(key, reuseMic = null) {
-  const p = new RTCPeerConnection({ iceServers: getIceServers(), iceCandidatePoolSize: 2 });
-
-  p.onicegatheringstatechange   = () => log("ICE-Gathering:", p.iceGatheringState);
-  p.onsignalingstatechange      = () => log("Signaling:", p.signalingState);
-  p.oniceconnectionstatechange  = () => log("ICE:", p.iceConnectionState);
-  p.onconnectionstatechange     = () => log("PC:", p.connectionState);
-
-  p.ontrack = (ev) => { audioEl.srcObject = ev.streams[0]; };
-
-  p.ondatachannel = (evt) => attachDCHandlers(p, evt.channel, "server");
-
-  const ch = p.createDataChannel("oai-events");
-  attachDCHandlers(p, ch, "client");
-
-  const mic = reuseMic || await navigator.mediaDevices.getUserMedia({
-    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 }
-  });
-  mic.getTracks().forEach(t => p.addTrack(t, mic));
-
-  const offer = await p.createOffer({ offerToReceiveAudio: true });
-  await p.setLocalDescription(offer);
-
-  const resp = await fetch("https://api.openai.com/v1/realtime?model=gpt-realtime", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${key}`,
-      "Content-Type": "application/sdp",
-      "OpenAI-Beta": "realtime=v1"
-    },
-    body: offer.sdp
-  });
-  const answer = await resp.text();
-  await p.setRemoteDescription({ type: "answer", sdp: answer });
-
-  return { peer: p, mic };
-}
-
-async function startConnection() {
-  const sess = await fetchSession();
-  currentKey = sess.key;
-  currentExpiryMs = sess.expiresAtMs;
-
-  const { peer, mic } = await createPeer(currentKey);
-  pc = peer;
-  micStream = mic;
-
-  log("✅ WebRTC verbunden. Du kannst sprechen.");
-  scheduleRollover();
-}
-
-async function softRollover() {
-  if (!pc) return;
-  log("🔄 Starte Session-Rollover …");
-  const sess = await fetchSession();
-  const { peer, mic } = await createPeer(sess.key, micStream);
-
-  // Warten bis neue Verbindung steht
-  const ok = await new Promise((resolve) => {
-    const to = setTimeout(() => resolve(false), 20000);
-    const onState = () => {
-      if (peer.connectionState === "connected" || peer.iceConnectionState === "connected") {
-        clearTimeout(to);
-        peer.removeEventListener("connectionstatechange", onState);
-        resolve(true);
-      }
-    };
-    peer.addEventListener("connectionstatechange", onState);
-    onState();
-  });
-
-  if (!ok) {
-    log("⚠️ Rollover: Secondary nicht verbunden – bleibe auf aktueller Session.");
-    try { peer.close(); } catch {}
-    scheduleRollover();
-    return;
-  }
-
-  // Promote
-  const oldPc = pc, oldDc = dc;
-  pc = peer; micStream = mic;
-  currentKey = sess.key; currentExpiryMs = sess.expiresAtMs;
-
-  if (peer._pendingOAIChannel && peer._pendingOAIChannel.readyState === "open") {
-    dc = peer._pendingOAIChannel;
-    log("ℹ️ DataChannel reattached after promote");
-  }
-  try { oldDc && oldDc.close(); } catch {}
-  try { oldPc && oldPc.close(); } catch {}
-
-  log("🔄 Session rollover completed.");
-  scheduleRollover();
-}
-
-/* ---------- UI Buttons ---------- */
-document.getElementById("start").onclick = async () => {
-  try {
-    document.getElementById("start").disabled = true;
-    document.getElementById("stop").disabled = false;
-    await startConnection();
-  } catch (e) {
-    log("❌ start error:", e.message || e);
-    document.getElementById("start").disabled = false;
-    document.getElementById("stop").disabled = true;
-  }
-};
-
-document.getElementById("stop").onclick = () => {
-  cleanup();
-  document.getElementById("start").disabled = false;
-  document.getElementById("stop").disabled = true;
-};
-
-window.addEventListener("beforeunload", () => cleanup());
-
-/* ---------- Initial Info ---------- */
-log("ℹ️ Aktuelle Settings → language:", state.language, "mode:", state.mode);
-</script>
+  <script src="./app.js"></script>
 </body>
 </html>

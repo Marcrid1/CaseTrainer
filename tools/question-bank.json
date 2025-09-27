@@ -1,0 +1,14 @@
+[
+  {
+    "id": "pf_motivation_1",
+    "type": "personal-fit",
+    "question": "What specifically motivates you to start in consulting, and why our firm?",
+    "guidance": "Listen for concrete drivers and firm-specific reasons."
+  },
+  {
+    "id": "bh_teamwork_1",
+    "type": "behavioral",
+    "question": "Tell me about a time you worked with others to deliver under time pressure.",
+    "guidance": "Invite STAR; probe their specific contribution."
+  }
+]
